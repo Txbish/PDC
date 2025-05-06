@@ -179,7 +179,6 @@ function GN_pla(g::AbstractGraph, vmap::Array{Int64,1}, tnc_tn::TensorNetwork)
 
     # Convert the input graph into its Python igraph representation
     h_ig = lg2ig(g)
-    h_ig.
 
     # Perform community detection using the Girvan-Newman algorithm
     comunitat = ordenacio_girvan_igraph(h_ig)
@@ -842,20 +841,18 @@ Performs a sequential contraction of a tensor network using a contraction plan g
 - `cct::Circ`: The input quantum circuit to be evaluated.
 - `timings::Bool`: If `true`, logs and prints timing information for each phase of the algorithm.
 
-# Returns
-- `Array{ComplexF64, 0}`: The result of the final contraction, representing the amplitude of a given input producing a given output.
+    # Returns
+    - `Array{ComplexF64, 0}`: The result of the final contraction, representing the amplitude of a given input producing a given output.
 
-# Notes
-This function executes three main steps:
-1. Converts the circuit into a tensor network and generates a line graph.
-2. Creates a contraction plan using the Girvan–Newman algorithm.
-3. Performs the sequential contraction of the tensor network based on the generated plan.
-"""
+    # Notes
+    This function executes three main steps:
+    1. Converts the circuit into a tensor network and generates a line graph.
+    2. Creates a contraction plan using the Girvan–Newman algorithm.
+    3. Performs the sequential contraction of the tensor network based on the generated plan.
+    """
 
 using TimerOutputs
 import QXZoo.Circuit.Circ
-
-
 
 function Calcul_GN_Sequencial(cct::Circ, timings::Bool=true)
 
@@ -895,7 +892,7 @@ end
 
 """
     ComParCPU(circ::Circ, entrada::Vector{Int}, eixida::Vector{Int}, n_com::Int; 
-              timings::Bool=true, decompose::Bool=true)
+            timings::Bool=true, decompose::Bool=true)
 
 Implements a three-phase tensor network contraction algorithm as described in the paper. 
 
@@ -982,13 +979,9 @@ function ComParCPU(circ::Circ, entrada::String, eixida::String, n_com::Int; timi
     return s
 end
 
-
-
-
-
 """"
     ComParCPU_para(circ::Circ, entrada::String, eixida::String, n_com::Int; 
-                   timings::Bool=true, decompose::Bool=true)
+                timings::Bool=true, decompose::Bool=true)
 
 Implements a three-phase tensor network contraction algorithm with parallelism in the final contraction phase.
 
@@ -1013,7 +1006,6 @@ This function consists of three phases:
 
 using TimerOutputs
 import QXZoo.Circuit.Circ
-
 
 function ComParCPU_para(circ::Circ, entrada::String, eixida::String, n_com::Int; timings::Bool=true, decompose::Bool=true)
     # Reset timing information if enabled
@@ -1153,7 +1145,7 @@ end
 
 """
     ComParCPU_para_GHZ(circ::Circ, entrada::String, eixida::String, n_com::Int; 
-                   timings::Bool=true, decompose::Bool=true)
+                timings::Bool=true, decompose::Bool=true)
 
 Implements a three-phase tensor network contraction algorithm with parallelism in the final contraction phase.
 
