@@ -841,7 +841,7 @@ Performs a sequential contraction of a tensor network using a contraction plan g
 - `cct::Circ`: The input quantum circuit to be evaluated.
 - `timings::Bool`: If `true`, logs and prints timing information for each phase of the algorithm.
 
-    # Returns
+    # Re@turns
     - `Array{ComplexF64, 0}`: The result of the final contraction, representing the amplitude of a given input producing a given output.
 
     # Notes
