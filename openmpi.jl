@@ -1,5 +1,5 @@
 # Add necessary packages
-import Pkg;
+# import Pkg; 
 # Pkg.add("QXTools")
 # Pkg.add("QXGraphDecompositions")
 # Pkg.add("QXZoo")
@@ -10,7 +10,7 @@ import Pkg;
 # Pkg.add("ITensors")
 # Pkg.add("LightGraphs")
 # Pkg.add("PyCall")
-Pkg.add("MPI")
+# Pkg.add("MPI")
 
 # Using required modules
 using QXTools
@@ -36,15 +36,10 @@ circuit = create_ghz_circuit(999)
 tnc = convert_to_tnc(circuit)
 
 # Configure the contraction algorithm
-num_communities = 12  # Number of communities for the multistage algorithm
+num_communities = 8  # Number of communities for the multistage algorithm
 input_state = "0"^999  # All qubits initialized to 0
 output_state = "1"^999 # Target output state
 
 # Run the ComPar algorithm using multicore CPU
 result = ComParCPU_MPI(circuit, input_state, output_state, num_communities;
     timings=true, decompose=true)
-# Print results
-println("Contraction completed. Results:")
-println(result)
-
-
