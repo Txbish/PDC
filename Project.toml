@@ -1,0 +1,6 @@
+[deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Conda = "8f4d0f93-b110-5947-807f-2305c1781a2d"
+PyCall = "438e738f-606a-5dbb-bf0a-cddfbfd45ab0"
+QXTools = "84f0eee1-10ae-40da-994b-b9d0e53829ae"
+TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
