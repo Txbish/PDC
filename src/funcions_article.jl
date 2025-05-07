@@ -529,7 +529,42 @@ function labelg_to_communitats_fastgreedy(labeled__light_graf::LabeledGraph)
     return comunitats_julia, comunitats_betwenness, modularitat
 end
 
+function labelg_to_communitats_fastgreedyMPI(labeled__light_graf::LabeledGraph, clusters::Int=0)
+    # Convert labeled graph to igraph format
+    h_Lg_ig = lg2ig(labeled__light_graf.graph)
 
+    # Detect communities using the Fast Greedy algorithm
+    vertex_dendrogram = h_Lg_ig.community_fastgreedy() # Obtain dendrogram
+
+    # Convert the detected communities to clustering format
+    # If clusters > 0 and is a valid number, cut the dendrogram. Otherwise, get optimal.
+    num_vertices = length(h_Lg_ig.vs)
+    if clusters > 0 && clusters <= num_vertices
+        communities_Lg = vertex_dendrogram.as_clustering(n=clusters)
+    else
+        communities_Lg = vertex_dendrogram.as_clustering() # Optimal number of communities
+    end
+    # Convert the communities to a Python list
+    comunitats_betwenness = py"""list"""(communities_Lg)
+
+    # Initialize an empty array to store the communities in Julia format
+    comunitats_julia = []
+
+    # Convert community indices from Python's 0-based indexing to Julia's 1-based indexing
+    for i in comunitats_betwenness
+        planet = Int[]
+        for j in 1:length(i)
+            push!(planet, i[j] + 1)
+        end
+        push!(comunitats_julia, planet)
+    end
+
+    # Compute the modularity of the detected community structure
+    modularitat = h_Lg_ig.modularity(communities_Lg)
+
+    # Return the communities in Julia format, Python format, and the modularity score
+    return comunitats_julia, comunitats_betwenness, modularitat
+end
 
 """
     pla_contraccio_multiple_G_N(nova_llista_comunitats_julia::Array{Any, 1}, 
@@ -841,7 +876,7 @@ Performs a sequential contraction of a tensor network using a contraction plan g
 - `cct::Circ`: The input quantum circuit to be evaluated.
 - `timings::Bool`: If `true`, logs and prints timing information for each phase of the algorithm.
 
-    # Re@turns
+    # Returns
     - `Array{ComplexF64, 0}`: The result of the final contraction, representing the amplitude of a given input producing a given output.
 
     # Notes
@@ -1264,251 +1299,167 @@ function ComParCPU_MPI(circ::Circ, entrada::String, eixida::String, n_com::Int;
     comm = MPI.COMM_WORLD
     rank = MPI.Comm_rank(comm)
     comm_size = MPI.Comm_size(comm)
-
-    # Use a unique print prefix for easier log analysis
+    n_com = comm_size
     print_prefix = "Rank $rank/$comm_size:"
 
-    println("$print_prefix MPI initialized.")
-
     if timings && rank == 0
-        # TimerOutputs.reset_timer!() initializes/resets TimerOutputs.DEFAULT_TIMER
         TimerOutputs.reset_timer!()
     end
 
-    # --- Variables scoped for the function ---
-    # These will hold significant data only on rank 0, except where broadcasted/sent
-    local tnc_for_phase1 = nothing # Only on rank 0
-    local light_graf_for_phase1 = nothing # Only on rank 0
-    local tns_for_distribution = nothing # List of TNs for each community, on rank 0
-    local plans_for_distribution = nothing # List of plans for each TN, on rank 0
+    local tnc_for_phase1 = nothing
+    local light_graf_for_phase1 = nothing
+    local tns_for_distribution = Vector{Any}()
+    local plans_for_distribution = Vector{Any}()
+    local merged_tn_after_phase2 = nothing
+    local final_scalar_result = nothing
 
-    local merged_tn_after_phase2 = nothing # Result of merging community contractions, on rank 0
-    local final_scalar_result = nothing # Final result, on rank 0
-
-    # --- Phase 1: Community detection and graph preparation (Executed only on Rank 0) ---
     if rank == 0
-        println("$print_prefix Starting Phase 1 - Community detection and graph preparation.")
+        println("$print_prefix [Phase 1] Starting community detection and graph preparation...")
         @timeit_on_master timings "1T.Obtaining Communities" begin
             tnc_for_phase1 = convert_to_tnc(circ; no_input=false, no_output=false, input=entrada, output=eixida, decompose=decompose)
-            println("$print_prefix Converted circuit to tensor network.")
             light_graf_for_phase1 = convert_to_graph(tnc_for_phase1)
-            println("$print_prefix Converted tensor network to graph.")
-
-            # These intermediate graph objects are only needed on rank 0 for community detection
             labeled_light_graf = LabeledGraph(light_graf_for_phase1)
-            labeled_line_light_graf = line_graph_tris(labeled_light_graf)
-            println("$print_prefix Generated labeled line graph.")
-
-            h_Lg_ig = lg2ig(labeled_light_graf.graph) # PyObject, stays on rank 0
-            println("$print_prefix Converted labeled graph to igraph object (PyObject).")
-            # h_Lg_ig.summary(verbosity=1) # Optional: prints igraph summary
-
-            comunitats_julia, _, _ = labelg_to_communitats_between(labeled_light_graf, n_com)
-            println("$print_prefix Detected $(length(comunitats_julia)) communities.")
-
+            comunitats_julia, _, _ = labelg_to_communitats_fastgreedyMPI(labeled_light_graf, n_com)
             if isempty(comunitats_julia) && LightGraphs.nv(light_graf_for_phase1) > 0
-                println("$print_prefix Warning: No communities detected, but graph has vertices. Treating as one community.")
                 comunitats_julia = [collect(1:LightGraphs.nv(light_graf_for_phase1))]
             elseif isempty(comunitats_julia) && LightGraphs.nv(light_graf_for_phase1) == 0
-                println("$print_prefix Graph is empty, no communities to process.")
-                # tns_for_distribution and plans_for_distribution will remain empty or nothing
+                tns_for_distribution = Vector{Any}()
+                plans_for_distribution = Vector{Any}()
             end
-
-            # tns_for_distribution and plans_for_distribution are generated here
-            # Ensure pla_contraccio_multiple_G_N handles empty comunitats_julia if that's possible
             if !isempty(comunitats_julia)
                 tns_for_distribution, plans_for_distribution = pla_contraccio_multiple_G_N(comunitats_julia, tnc_for_phase1, light_graf_for_phase1)
-                println("$print_prefix Generated contraction plans and tensor networks for $(length(tns_for_distribution)) communities.")
             else
-                tns_for_distribution = [] # Ensure they are empty arrays if no communities
-                plans_for_distribution = []
-                println("$print_prefix No communities to generate TNs/plans for.")
+                tns_for_distribution = Vector{Any}()
+                plans_for_distribution = Vector{Any}()
             end
-        end # @timeit_on_master "1T..."
-    end # if rank == 0 (Phase 1)
+            println("$print_prefix [Phase 1] Finished community detection. Number of communities: $(length(tns_for_distribution))")
+        end
+    end
 
-    MPI.Barrier(comm) # Ensure rank 0 finishes Phase 1 before others proceed far into Phase 2 logic
+    MPI.Barrier(comm)
 
-    # --- Phase 2: Distributed contraction of communities ---
-    println("$print_prefix Starting Phase 2 - Distributed contraction of communities.")
+    # --- Optimized Phase 2: Batched, non-blocking communication ---
     @timeit_on_master timings "2T.Distributed contraction of communities" begin
-        num_total_tasks_ref = Ref{Cint}(0) # Use Ref for MPI.bcast! for a scalar
+        num_total_tasks_ref = Ref{Cint}(0)
         if rank == 0
-            if tns_for_distribution !== nothing
-                num_total_tasks_ref[] = length(tns_for_distribution)
-            else # Should have been initialized to [] if no communities
-                num_total_tasks_ref[] = 0
-            end
-            println("$print_prefix Total tasks to distribute: $(num_total_tasks_ref[]).")
+            num_total_tasks_ref[] = length(tns_for_distribution)
         end
         MPI.Bcast!(num_total_tasks_ref, 0, comm)
-        num_total_tasks = Int(num_total_tasks_ref[]) # Convert Cint to Int
+        num_total_tasks = Int(num_total_tasks_ref[])
 
-        println("$print_prefix Received broadcasted total tasks: $num_total_tasks.")
+        # Compute batch assignment
+        batch_indices = [i for i in 1:num_total_tasks if (i - 1) % comm_size == rank]
+        local_results = Vector{Any}(undef, length(batch_indices))
 
-        # Storage for results on master; workers don't need this large structure
-        local contracted_community_tns_collector = Vector{Any}(undef, num_total_tasks)
-
-        if num_total_tasks == 0
-            println("$print_prefix No tasks to process in Phase 2.")
-            if rank == 0
-                # If there were no tasks, the "merged" TN is essentially the original TN if it had no communities,
-                # or an empty TN if the original was empty.
-                # If tnc_for_phase1 exists and the graph was not empty but yielded no communities (edge case),
-                # pla_contraccio_multiple_G_N should ideally return the original TN as one "community".
-                # For now, assume if num_total_tasks is 0, merged_tn_after_phase2 will be empty or based on tnc_for_phase1.
-                if tnc_for_phase1 !== nothing && length(tnc_for_phase1.tn.tensor_map) > 0 && (tns_for_distribution === nothing || isempty(tns_for_distribution))
-                    println("$print_prefix No communities processed via MPI; original TN might be used if appropriate.")
-                    merged_tn_after_phase2 = tnc_for_phase1.tn # Fallback if no actual community tasks
-                else
-                    merged_tn_after_phase2 = TensorNetwork() # Default to empty
+        # Master sends batches to workers (non-blocking)
+        if rank == 0
+            println("$print_prefix [Phase 2] Distributing contraction tasks to workers...")
+            for worker in 1:comm_size-1
+                indices = [i for i in 1:num_total_tasks if (i - 1) % comm_size == worker]
+                batch = [(deepcopy(tns_for_distribution[i]), plans_for_distribution[i]) for i in indices]
+                MPI.send(batch, worker, 0, comm)
+            end
+            # Master processes its own batch
+            println("$print_prefix [Phase 2] Master processing its own batch of $(length(batch_indices)) tasks...")
+            contraction_time = @elapsed begin
+                for (j, i) in enumerate([i for i in 1:num_total_tasks if (i - 1) % comm_size == 0])
+                    tn, plan = deepcopy(tns_for_distribution[i]), plans_for_distribution[i]
+                    contract_tn!(tn, plan)
+                    local_results[j] = tn
                 end
             end
-        else # num_total_tasks > 0
-            if rank == 0
-                # Master distributes tasks and processes its own
-                for task_idx_0based in 0:(num_total_tasks-1)
-                    task_idx_1based = task_idx_0based + 1
-                    target_rank = task_idx_0based % comm_size
-
-                    # Ensure tns_for_distribution and plans_for_distribution are accessed correctly
-                    current_tn_data = tns_for_distribution[task_idx_1based]
-                    current_plan_data = plans_for_distribution[task_idx_1based]
-
-                    if target_rank == 0 # Master processes this task itself
-                        println("$print_prefix Processing task $task_idx_0based locally.")
-                        # Deepcopy is crucial here to prevent workers from affecting master's original data
-                        # or master's local processing from affecting data intended for other workers if not careful.
-                        # Since we send copies, master processing a deepcopy of its own task is consistent.
-                        tn_to_contract = deepcopy(current_tn_data)
-                        plan_to_use = current_plan_data # Plans are usually read-only
-
-                        contract_tn!(tn_to_contract, plan_to_use)
-                        contracted_community_tns_collector[task_idx_1based] = tn_to_contract
-                    else
-                        println("$print_prefix Sending task $task_idx_0based (data index $task_idx_1based) to rank $target_rank.")
-                        # Send a tuple: (TensorNetwork, Plan)
-                        # Using deepcopy of current_tn_data before sending to ensure no aliasing issues if current_tn_data was complex
-                        data_to_send = (deepcopy(current_tn_data), current_plan_data)
-                        MPI.send(data_to_send, target_rank, task_idx_1based, comm) # Tag with 1-based task_idx
-                    end
+            println("$print_prefix [Phase 2] Master contraction time: $(contraction_time) seconds")
+        else
+            # Workers receive their batch
+            batch, _ = MPI.recv(0, 0, comm)
+            println("$print_prefix [Phase 2] Received $(length(batch)) contraction tasks from master.")
+            contraction_time = @elapsed begin
+                for (j, (tn, plan)) in enumerate(batch)
+                    contract_tn!(tn, plan)
+                    local_results[j] = tn
                 end
+            end
+            println("$print_prefix [Phase 2] Worker contraction time: $(contraction_time) seconds")
+        end
 
-                # Master collects results from workers
-                println("$print_prefix Master collecting results from workers.")
-                for task_idx_0based in 0:(num_total_tasks-1)
-                    task_idx_1based = task_idx_0based + 1
-                    target_rank = task_idx_0based % comm_size
-                    if target_rank != 0 # If task was sent to a worker
-                        println("$print_prefix Receiving result for task $task_idx_0based (data index $task_idx_1based) from rank $target_rank.")
-                        # The received data is the contracted TensorNetwork
-                        received_contracted_tn, status = MPI.recv(target_rank, task_idx_1based, comm)
-                        contracted_community_tns_collector[task_idx_1based] = received_contracted_tn
-                    end
+        # Gather results at master
+        if rank == 0
+            contracted_community_tns_collector = Vector{Any}(undef, num_total_tasks)
+            # Place master's results
+            for (j, i) in enumerate([i for i in 1:num_total_tasks if (i - 1) % comm_size == 0])
+                contracted_community_tns_collector[i] = local_results[j]
+            end
+            # Receive from workers
+            for worker in 1:comm_size-1
+                indices = [i for i in 1:num_total_tasks if (i - 1) % comm_size == worker]
+                worker_results, _ = MPI.recv(worker, 1, comm)
+                for (j, i) in enumerate(indices)
+                    contracted_community_tns_collector[i] = worker_results[j]
                 end
-
-                # Merge all contracted community TensorNetworks on Master
-                println("$print_prefix Merging $(length(filter(i -> isassigned(contracted_community_tns_collector,i) && contracted_community_tns_collector[i]!==nothing, 1:num_total_tasks))) collected community tensor networks.")
-                merged_tn_after_phase2 = TensorNetwork() # Start with an empty TensorNetwork
-                for i in 1:num_total_tasks
-                    if isassigned(contracted_community_tns_collector, i) && contracted_community_tns_collector[i] !== nothing
-                        merged_tn_after_phase2 = Base.merge(merged_tn_after_phase2, contracted_community_tns_collector[i])
-                    else
-                        # This might happen if a task was not assigned or a worker failed,
-                        # though current logic assigns all tasks.
-                        println("$print_prefix Warning - Task $i result was not properly collected or was nothing during merge.")
-                    end
+            end
+            println("$print_prefix [Phase 2] All contraction results gathered. Merging contracted tensor networks...")
+            # Merge all contracted TNs
+            merged_tn_after_phase2 = TensorNetwork()
+            for tn in contracted_community_tns_collector
+                if tn !== nothing
+                    merged_tn_after_phase2 = Base.merge(merged_tn_after_phase2, tn)
                 end
+            end
+            println("$print_prefix [Phase 2] Merging complete.")
+        else
+            # Workers send their results back
+            MPI.send(local_results, 0, 1, comm)
+            println("$print_prefix [Phase 2] Sent contraction results to master.")
+        end
+    end
 
-            else # Worker ranks (rank > 0)
-                for task_idx_0based in 0:(num_total_tasks-1)
-                    task_idx_1based = task_idx_0based + 1
-                    if task_idx_0based % comm_size == rank # This task is assigned to me
-                        println("$print_prefix Receiving task $task_idx_0based (data index $task_idx_1based) from rank 0.")
-                        (received_tn, received_plan), status = MPI.recv(0, task_idx_1based, comm)
+    MPI.Barrier(comm)
 
-                        println("$print_prefix Contracting task $task_idx_0based.")
-                        contract_tn!(received_tn, received_plan) # Modifies received_tn in place
-
-                        println("$print_prefix Sending result for task $task_idx_0based back to rank 0.")
-                        MPI.send(received_tn, 0, task_idx_1based, comm)
-                    end
-                end
-            end # if rank == 0 / else (Phase 2 data processing)
-        end # if num_total_tasks > 0 else
-    end # @timeit_on_master "2T..."
-
-    MPI.Barrier(comm) # Synchronize all processes after Phase 2
-    println("$print_prefix Phase 2 completed and synchronized.")
-
-    # --- Phase 3: Final sequential contraction (Executed only on Rank 0) ---
+    # --- Phase 3: Final contraction (unchanged) ---
     if rank == 0
-        println("$print_prefix Starting Phase 3 - Final sequential contraction.")
+        println("$print_prefix [Phase 3] Starting final contraction...")
         @timeit_on_master timings "3T.Final Contraction" begin
             final_tn_for_contraction = nothing
             if merged_tn_after_phase2 !== nothing && length(merged_tn_after_phase2.tensor_map) > 0
                 final_tn_for_contraction = merged_tn_after_phase2
-            elseif tnc_for_phase1 !== nothing && num_total_tasks == 0 # No communities, use original TN
+            elseif tnc_for_phase1 !== nothing && num_total_tasks_ref[] == 0
                 final_tn_for_contraction = tnc_for_phase1.tn
-                println("$print_prefix No community tasks were processed; using original TN for final contraction.")
-            else # merged_tn_after_phase2 is empty or tnc_for_phase1 was not available/empty
-                final_tn_for_contraction = TensorNetwork() # Fallback to an empty TN
-                println("$print_prefix Merged network is empty or unavailable; final contraction will be on an empty TN.")
+            else
+                final_tn_for_contraction = TensorNetwork()
             end
 
             if length(final_tn_for_contraction.tensor_map) == 0
-                final_scalar_result = fill(ComplexF64(0.0)) # Or appropriate representation for "empty" result
-                # To match Array{ComplexF64, 0} it needs to be a 0-dim array
-                final_scalar_result = convert(Array{ComplexF64,0}, final_scalar_result)
-                println("$print_prefix No tensors in network for final contraction. Result: $final_scalar_result")
+                final_scalar_result = convert(Array{ComplexF64,0}, fill(ComplexF64(0.0)))
+                println("$print_prefix [Phase 3] Final tensor network is empty. Returning 0.")
             elseif length(final_tn_for_contraction.tensor_map) == 1 && ndims(first(values(final_tn_for_contraction.tensor_map))) == 0
                 s_master_tensor = first(values(final_tn_for_contraction.tensor_map))
-                # Ensure final_scalar_result is Array{ComplexF64,0}
-                # Create a 0-dim array and fill it.
                 final_scalar_result_val = convert(ComplexF64, NDTensors.data(storage(s_master_tensor))[1])
-                final_scalar_result = fill(final_scalar_result_val)
-                println("$print_prefix Network for final contraction is already a scalar. Result: $final_scalar_result")
+                final_scalar_result = convert(Array{ComplexF64,0}, fill(final_scalar_result_val))
+                println("$print_prefix [Phase 3] Final tensor network is a scalar. Returning value.")
             else
-                println("$print_prefix Performing final contraction on network with $(length(final_tn_for_contraction.tensor_map)) tensors.")
                 try
-                    tw, pla_final = min_fill_contraction_plan_tw(final_tn_for_contraction)
-                    final_scalar_result = contract_tn!(final_tn_for_contraction, pla_final) # Should return the scalar storage
-                    println("$print_prefix Final contraction successful.")
-                catch e
-                    println("$print_prefix Error during final contraction: $e")
-                    #showerror(stdout, e, catch_backtrace()) # More detailed error
-                    final_scalar_result = fill(ComplexF64(NaN)) # Indicate error
+                    _, pla_final = min_fill_contraction_plan_tw(final_tn_for_contraction)
+                    contraction_time = @elapsed begin
+                        final_scalar_result = contract_tn!(final_tn_for_contraction, pla_final)
+                    end
+                    println("$print_prefix [Phase 3] Final contraction time: $(contraction_time) seconds")
+                catch
+                    final_scalar_result = convert(Array{ComplexF64,0}, fill(ComplexF64(NaN)))
+                    println("$print_prefix [Phase 3] Error in final contraction. Returning NaN.")
                 end
             end
-        end # @timeit_on_master "3T..."
-    end # if rank == 0 (Phase 3)
+        end
+        println("$print_prefix [Phase 3] Final contraction complete.")
+    end
 
-    MPI.Barrier(comm) # Ensure rank 0 completes Phase 3 before all finalize
-
+    MPI.Barrier(comm)
     if timings && rank == 0
-        println("$print_prefix Final Timer Outputs:")
         TimerOutputs.print_timer(TimerOutputs.DEFAULT_TIMER)
     end
 
-    println("$print_prefix Finalizing MPI.")
-    # MPI.Finalize() is called automatically at exit if not already finalized.
-    # Explicitly calling it can be good practice if there's code after it,
-    # but if it's the end of the function and script, it's less critical.
-    # However, if any rank errors and exits prematurely, other ranks might hang.
-    # If MPI.Finalize() was already called by a process that errored out,
-    # calling it again can be an issue. For now, let it be called on exit.
-    # MPI.Finalize() # Let's add it for explicitness, assuming clean exits.
-    # Reconsidering: if one rank finalizes and others are still in MPI calls, it's bad.
-    # Best to ensure all ranks reach this point together. The barrier helps.
-
-    # Ensure MPI.Finalize is called only once per process, even if errors occur elsewhere.
-    # A `try...finally MPI.Finalize()` block at the top level of the script is robust.
-    # For this function, we rely on the exit handler if not explicit.
-    # Given the barrier before this, it's safer to call finalize.
+    result = rank == 0 ? final_scalar_result : nothing
     if MPI.Initialized() && !MPI.Finalized()
         MPI.Finalize()
     end
-
-
-    return rank == 0 ? final_scalar_result : nothing
+    return result
 end
